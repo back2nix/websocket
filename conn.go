@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -102,11 +103,8 @@ func (e *netError) Timeout() bool   { return e.timeout }
 
 // CloseError represents a close message.
 type CloseError struct {
-	// Code is defined in RFC 6455, section 11.7.
-	Code int
-
-	// Text is the optional text payload.
 	Text string
+	Code int
 }
 
 func (e *CloseError) Error() string {
@@ -237,52 +235,65 @@ type BufferPool interface {
 // added to the pool.
 type writePoolData struct{ buf []byte }
 
+type AtomicMutex struct {
+	// locked int32
+	mutex sync.Mutex
+}
+
+func (m *AtomicMutex) Lock() {
+	m.mutex.Lock()
+	// for !atomic.CompareAndSwapInt32(&m.locked, 0, 1) {
+	// 	runtime.Gosched() // Даем другим горутинам выполниться
+	// }
+}
+
+func (m *AtomicMutex) Unlock() {
+	m.mutex.Unlock()
+	// atomic.StoreInt32(&m.locked, 0)
+}
+
+func (m *AtomicMutex) TryLock() bool {
+	// return atomic.CompareAndSwapInt32(&m.locked, 0, 1)
+	return m.mutex.TryLock()
+}
+
 // The Conn type represents a WebSocket connection.
 type Conn struct {
-	conn        net.Conn
-	isServer    bool
-	subprotocol string
-
-	// Write fields
-	mu            chan struct{} // used as mutex to protect write to conn
-	writeBuf      []byte        // frame is constructed in this buffer.
-	writePool     BufferPool
-	writeBufSize  int
-	writeDeadline time.Time
-	writer        io.WriteCloser // the current writer returned to the application
-	isWriting     bool           // for best-effort concurrent write detection
-
-	writeErrMu sync.Mutex
-	writeErr   error
-
-	enableWriteCompression bool
-	compressionLevel       int
-	newCompressionWriter   func(io.WriteCloser, int) io.WriteCloser
-
-	// Read fields
-	reader  io.ReadCloser // the current reader returned to the application
-	readErr error
-	br      *bufio.Reader
-	// bytes remaining in current frame.
-	// set setReadRemaining to safely update this value and prevent overflow
-	readRemaining int64
-	readFinal     bool  // true the current message has more frames.
-	readLength    int64 // Message size.
-	readLimit     int64 // Maximum message size.
-	readMaskPos   int
-	readMaskKey   [4]byte
-	handlePong    func(string) error
-	handlePing    func(string) error
-	handleClose   func(int, string) error
-	readErrCount  int
-	messageReader *messageReader // the current low-level reader
-
-	readDecompress         bool // whether last read frame had RSV1 set
+	writeDeadline          time.Time
+	readErr                error
+	writer                 io.WriteCloser
+	reader                 io.ReadCloser
+	writeErr               error
+	writePool              BufferPool
+	conn                   net.Conn
+	messageReader          *messageReader
 	newDecompressionReader func(io.Reader) io.ReadCloser
+	handleClose            func(int, string) error
+	handlePing             func(string) error
+	handlePong             func(string) error
+	br                     *bufio.Reader
+	newCompressionWriter   func(io.WriteCloser, int) io.WriteCloser
+	subprotocol            string
+	writeBuf               []byte
+	readMaskPos            int
+	compressionLevel       int
+	readRemaining          int64
+	writeBufSize           int
+	readLength             int64
+	readLimit              int64
+	readErrCount           int
+	writeErrMu             sync.Mutex
+	mu                     AtomicMutex
+	readFailures           atomic.Int32
+	readMaskKey            [4]byte
+	enableWriteCompression bool
+	isWriting              bool
+	isServer               bool
+	readDecompress         bool
+	readFinal              bool
 }
 
 func newConn(conn net.Conn, isServer bool, readBufferSize, writeBufferSize int, writeBufferPool BufferPool, br *bufio.Reader, writeBuf []byte) *Conn {
-
 	if br == nil {
 		if readBufferSize == 0 {
 			readBufferSize = defaultReadBufferSize
@@ -302,13 +313,10 @@ func newConn(conn net.Conn, isServer bool, readBufferSize, writeBufferSize int, 
 		writeBuf = make([]byte, writeBufferSize)
 	}
 
-	mu := make(chan struct{}, 1)
-	mu <- struct{}{}
 	c := &Conn{
 		isServer:               isServer,
 		br:                     br,
 		conn:                   conn,
-		mu:                     mu,
 		readFinal:              true,
 		writeBuf:               writeBuf,
 		writePool:              writeBufferPool,
@@ -396,11 +404,8 @@ func (c *Conn) read(n int) ([]byte, error) {
 }
 
 func (c *Conn) write(frameType int, deadline time.Time, buf0, buf1 []byte) error {
-	if c == nil {
-		return ErrNilConn
-	}
-	<-c.mu
-	defer func() { c.mu <- struct{}{} }()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	c.writeErrMu.Lock()
 	err := c.writeErr
@@ -408,6 +413,7 @@ func (c *Conn) write(frameType int, deadline time.Time, buf0, buf1 []byte) error
 	if err != nil {
 		return err
 	}
+
 	if c.conn == nil {
 		return ErrNilNetConn
 	}
@@ -418,12 +424,15 @@ func (c *Conn) write(frameType int, deadline time.Time, buf0, buf1 []byte) error
 	} else {
 		err = c.writeBufs(buf0, buf1)
 	}
+
 	if err != nil {
 		return c.writeFatal(err)
 	}
+
 	if frameType == CloseMessage {
 		c.writeFatal(ErrCloseSent)
 	}
+
 	return nil
 }
 
@@ -472,14 +481,19 @@ func (c *Conn) WriteControl(messageType int, data []byte, deadline time.Time) er
 		}
 	}
 
-	timer := time.NewTimer(d)
-	select {
-	case <-c.mu:
-		timer.Stop()
-	case <-timer.C:
+	if !c.mu.TryLock() {
 		return errWriteTimeout
 	}
-	defer func() { c.mu <- struct{}{} }()
+	defer c.mu.Unlock()
+
+	// timer := time.NewTimer(d)
+	// select {
+	// case <-c.mu:
+	// 	timer.Stop()
+	// case <-timer.C:
+	// 	return errWriteTimeout
+	// }
+	// defer func() { c.mu <- struct{}{} }()
 
 	c.writeErrMu.Lock()
 	err := c.writeErr
@@ -567,11 +581,11 @@ func (c *Conn) NextWriter(messageType int) (io.WriteCloser, error) {
 }
 
 type messageWriter struct {
-	c         *Conn
-	compress  bool // whether next call to flushFrame should set RSV1
-	pos       int  // end of data in writeBuf.
-	frameType int  // type of the current frame.
 	err       error
+	c         *Conn
+	pos       int
+	frameType int
+	compress  bool
 }
 
 func (w *messageWriter) endMessage(err error) error {
@@ -659,12 +673,10 @@ func (w *messageWriter) flushFrame(final bool, extra []byte) error {
 	c.isWriting = true
 
 	err := c.write(w.frameType, c.writeDeadline, c.writeBuf[framePos:w.pos], extra)
-
 	if !c.isWriting {
 		panic("concurrent write to websocket connection")
 	}
 	c.isWriting = false
-
 	if err != nil {
 		return w.endMessage(err)
 	}
@@ -1046,11 +1058,12 @@ func (c *Conn) handleProtocolError(message string) error {
 // returns a non-nil error value. Errors returned from this method are
 // permanent. Once this method returns a non-nil error, all subsequent calls to
 // this method return the same error.
+
 func (c *Conn) NextReader() (messageType int, r io.Reader, err error) {
 	if c == nil {
 		return 0, nil, ErrNilConn
 	}
-	// Close previous reader, only relevant for decompression.
+
 	if c.reader != nil {
 		c.reader.Close()
 		c.reader = nil
@@ -1065,7 +1078,6 @@ func (c *Conn) NextReader() (messageType int, r io.Reader, err error) {
 			c.readErr = err
 			break
 		}
-
 		if frameType == TextMessage || frameType == BinaryMessage {
 			c.messageReader = &messageReader{c}
 			c.reader = c.messageReader
@@ -1076,11 +1088,9 @@ func (c *Conn) NextReader() (messageType int, r io.Reader, err error) {
 		}
 	}
 
-	// Applications that do handle the error returned from this method spin in
-	// tight loop on connection failure. To help application developers detect
-	// this error, panic on repeated reads to the failed connection.
-	c.readErrCount++
-	if c.readErrCount >= 1000 {
+	// Увеличиваем счетчик неудачных чтений
+	failures := c.readFailures.Add(1)
+	if failures >= 1000 {
 		panic("repeated read on failed websocket connection")
 	}
 

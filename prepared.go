@@ -17,10 +17,10 @@ import (
 // because the CPU and memory expensive compression operation can be executed
 // once for a given set of compression options.
 type PreparedMessage struct {
-	messageType int
-	data        []byte
-	mu          sync.Mutex
 	frames      map[prepareKey]*preparedFrame
+	data        []byte
+	messageType int
+	mu          sync.Mutex
 }
 
 // prepareKey defines a unique set of options to cache prepared frames in PreparedMessage.
@@ -32,8 +32,8 @@ type prepareKey struct {
 
 // preparedFrame contains data in wire representation.
 type preparedFrame struct {
-	once sync.Once
 	data []byte
+	once sync.Once
 }
 
 // NewPreparedMessage returns an initialized PreparedMessage. You can then send
@@ -73,12 +73,9 @@ func (pm *PreparedMessage) frame(key prepareKey) (int, []byte, error) {
 		// Prepare a frame using a 'fake' connection.
 		// TODO: Refactor code in conn.go to allow more direct construction of
 		// the frame.
-		mu := make(chan struct{}, 1)
-		mu <- struct{}{}
 		var nc prepareConn
 		c := &Conn{
 			conn:                   &nc,
-			mu:                     mu,
 			isServer:               key.isServer,
 			compressionLevel:       key.compressionLevel,
 			enableWriteCompression: true,
@@ -94,8 +91,8 @@ func (pm *PreparedMessage) frame(key prepareKey) (int, []byte, error) {
 }
 
 type prepareConn struct {
-	buf bytes.Buffer
 	net.Conn
+	buf bytes.Buffer
 }
 
 func (pc *prepareConn) Write(p []byte) (int, error)        { return pc.buf.Write(p) }

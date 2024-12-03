@@ -51,64 +51,18 @@ func NewClient(netConn net.Conn, u *url.URL, requestHeader http.Header, readBufS
 //
 // It is safe to call Dialer's methods concurrently.
 type Dialer struct {
-	// NetDial specifies the dial function for creating TCP connections. If
-	// NetDial is nil, net.Dialer DialContext is used.
-	NetDial func(network, addr string) (net.Conn, error)
-
-	// NetDialContext specifies the dial function for creating TCP connections. If
-	// NetDialContext is nil, NetDial is used.
-	NetDialContext func(ctx context.Context, network, addr string) (net.Conn, error)
-
-	// NetDialTLSContext specifies the dial function for creating TLS/TCP connections. If
-	// NetDialTLSContext is nil, NetDialContext is used.
-	// If NetDialTLSContext is set, Dial assumes the TLS handshake is done there and
-	// TLSClientConfig is ignored.
+	WriteBufferPool   BufferPool
+	Jar               http.CookieJar
+	NetDial           func(network, addr string) (net.Conn, error)
+	NetDialContext    func(ctx context.Context, network, addr string) (net.Conn, error)
 	NetDialTLSContext func(ctx context.Context, network, addr string) (net.Conn, error)
-
-	// Proxy specifies a function to return a proxy for a given
-	// Request. If the function returns a non-nil error, the
-	// request is aborted with the provided error.
-	// If Proxy is nil or returns a nil *URL, no proxy is used.
-	Proxy func(*http.Request) (*url.URL, error)
-
-	// TLSClientConfig specifies the TLS configuration to use with tls.Client.
-	// If nil, the default configuration is used.
-	// If either NetDialTLS or NetDialTLSContext are set, Dial assumes the TLS handshake
-	// is done there and TLSClientConfig is ignored.
-	TLSClientConfig *tls.Config
-
-	// HandshakeTimeout specifies the duration for the handshake to complete.
-	HandshakeTimeout time.Duration
-
-	// ReadBufferSize and WriteBufferSize specify I/O buffer sizes in bytes. If a buffer
-	// size is zero, then a useful default size is used. The I/O buffer sizes
-	// do not limit the size of the messages that can be sent or received.
-	ReadBufferSize, WriteBufferSize int
-
-	// WriteBufferPool is a pool of buffers for write operations. If the value
-	// is not set, then write buffers are allocated to the connection for the
-	// lifetime of the connection.
-	//
-	// A pool is most useful when the application has a modest volume of writes
-	// across a large number of connections.
-	//
-	// Applications should use a single pool for each unique value of
-	// WriteBufferSize.
-	WriteBufferPool BufferPool
-
-	// Subprotocols specifies the client's requested subprotocols.
-	Subprotocols []string
-
-	// EnableCompression specifies if the client should attempt to negotiate
-	// per message compression (RFC 7692). Setting this value to true does not
-	// guarantee that compression will be supported. Currently only "no context
-	// takeover" modes are supported.
+	Proxy             func(*http.Request) (*url.URL, error)
+	TLSClientConfig   *tls.Config
+	Subprotocols      []string
+	HandshakeTimeout  time.Duration
+	ReadBufferSize    int
+	WriteBufferSize   int
 	EnableCompression bool
-
-	// Jar specifies the cookie jar.
-	// If Jar is nil, cookies are not sent in requests and ignored
-	// in responses.
-	Jar http.CookieJar
 }
 
 // Dial creates a new client connection by calling DialContext with a background context.
