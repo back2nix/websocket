@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -237,24 +238,25 @@ type writePoolData struct{ buf []byte }
 
 type AtomicMutex struct {
 	// locked int32
-	mutex sync.Mutex
+	// mutex sync.Mutex
 }
 
 func (m *AtomicMutex) Lock() {
-	m.mutex.Lock()
+	// m.mutex.Lock()
 	// for !atomic.CompareAndSwapInt32(&m.locked, 0, 1) {
 	// 	runtime.Gosched() // Даем другим горутинам выполниться
 	// }
 }
 
 func (m *AtomicMutex) Unlock() {
-	m.mutex.Unlock()
+	// m.mutex.Unlock()
 	// atomic.StoreInt32(&m.locked, 0)
 }
 
 func (m *AtomicMutex) TryLock() bool {
+	return false
 	// return atomic.CompareAndSwapInt32(&m.locked, 0, 1)
-	return m.mutex.TryLock()
+	// return m.mutex.TryLock()
 }
 
 // The Conn type represents a WebSocket connection.
