@@ -11,7 +11,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
